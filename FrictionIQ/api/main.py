@@ -174,7 +174,7 @@ def create_app() -> FastAPI:
         return TriggerResponse(
             trigger_id=result["trigger_id"],
             status=result["status"],
-            message=f"Intervention '{req.intervention_type}' sent via {req.channel}",
+            message=f"Simulated intervention '{req.intervention_type}' via {req.channel}; no message was delivered",
             audit_entry_id=audit_entry_id,
         )
 
@@ -309,13 +309,13 @@ def create_app() -> FastAPI:
         }
 
     # ── Serve frontend ────────────────────────────────────────────────────────
-    frontend_dir = Path("frontend/static")
+    frontend_dir = Path(__file__).resolve().parents[1] / "frontend" / "static"
     if frontend_dir.exists():
         app.mount("/static", StaticFiles(directory=str(frontend_dir)), name="static")
 
     @app.get("/", response_class=HTMLResponse)
     async def serve_frontend():
-        index_path = Path("frontend/static/index.html")
+        index_path = frontend_dir / "index.html"
         if index_path.exists():
             return HTMLResponse(index_path.read_text(encoding="utf-8"))
         return HTMLResponse("<h1>FrictionIQ – API running. Frontend not built yet.</h1><p><a href='/api/docs'>API Docs</a></p>")
@@ -325,7 +325,7 @@ def create_app() -> FastAPI:
         if (path.startswith("api/") or path.startswith("health") or
             path.startswith("sessions/") or path.startswith("friction/")):
             raise HTTPException(status_code=404)
-        index_path = Path("frontend/static/index.html")
+        index_path = frontend_dir / "index.html"
         if index_path.exists():
             return HTMLResponse(index_path.read_text(encoding="utf-8"))
         raise HTTPException(status_code=404)

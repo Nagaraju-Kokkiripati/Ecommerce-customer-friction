@@ -58,7 +58,7 @@ class WorkflowTriggerService:
         trigger_id = f"TRG-{uuid.uuid4().hex[:8].upper()}"
         return {
             "trigger_id": trigger_id,
-            "status": "sent",
+            "status": "simulated",
             "channel": channel,
             "intervention_type": intervention_type,
             "timestamp": datetime.utcnow().isoformat(),

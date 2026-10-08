@@ -55,7 +55,7 @@ class TestBusinessServices(unittest.TestCase):
             metadata={"priority": "high"},
         )
         self.assertIn("trigger_id", trigger_res)
-        self.assertEqual(trigger_res["status"], "sent")
+        self.assertEqual(trigger_res["status"], "simulated")
 
         # Record and fetch audit log
         entry_id = self.audit_svc.record(

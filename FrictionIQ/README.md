@@ -48,13 +48,28 @@
 
 ## Setup & Running the Application
 
-### 1. Activate Virtual Environment
+### 1. Install dependencies (from the FrictionIQ directory)
 ```powershell
+python -m venv venv
+.\venv\Scripts\python.exe -m pip install -r requirements.txt
 .\venv\Scripts\Activate.ps1
 ```
 
+Use Python 3.11 or newer. The requirements include the API, rule-based
+inference, and test dependencies. XGBoost, LightGBM, SHAP, and Streamlit are
+optional extras; install them separately if you need those features. Without
+the optional model packages, risk scoring uses the existing rule-based fallback.
+
+This is a prototype with bundled synthetic data, illustrative dashboard
+insights, development demo authentication, and in-memory audit records.
+Recovery actions return `simulated`; no email or SMS is delivered. Assisted
+responses now call the API and record a simulated intervention in the audit log.
+The customer storefront, durable session ingestion, real email delivery, and
+production authentication still need implementation.
+
 ### 2. Start the Backend API & SPA Server
 ```powershell
+$env:DEBUG = 'false'
 python -m uvicorn frictioniq.main:app --reload --port 8000
 ```
 - Access Modern SPA: [http://localhost:8000/](http://localhost:8000/)
@@ -73,6 +88,7 @@ streamlit run frontend/app.py
 Run the complete test suite (19 unit & integration tests covering APIs, multi-agent graph, and business services):
 ```powershell
 .\venv\Scripts\python -m unittest discover -s tests -p "test_*.py"
+node tests/test_recovery_ui.cjs
 ```
 
 ---

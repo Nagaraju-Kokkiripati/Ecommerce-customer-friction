@@ -36,7 +36,7 @@ function showToast(message, type = 'info', duration = 3500) {
   const container = document.getElementById('toast-container');
   const toast = document.createElement('div');
   toast.className = `toast toast-${type}`;
-  toast.innerHTML = `<span>${message}</span>`;
+  toast.textContent = message;
   container.appendChild(toast);
   setTimeout(() => { toast.style.opacity = '0'; toast.style.transition = 'opacity 300ms'; setTimeout(() => toast.remove(), 300); }, duration);
 }
@@ -610,9 +610,9 @@ async function approveIntervention(type, channel) {
     }),
   });
   if (result) {
-    showToast(`✅ Intervention sent! Trigger ID: ${result.trigger_id}`, 'success', 5000);
+    showToast(`${result.message}. Trigger ID: ${result.trigger_id}`, 'info', 5000);
   } else {
-    showToast(`✅ Intervention '${type}' triggered via ${channel}`, 'success');
+    showToast('Intervention failed. Check the API connection and permissions, then retry.', 'error');
   }
 }
 
@@ -851,11 +851,25 @@ function generateResponse() {
   showToast('AI message generated — review before sending', 'info');
 }
 
-function sendResponse() {
+async function sendResponse() {
   const text = document.getElementById('response-text').value;
   if (!text.trim()) { showToast('Please generate a message first', 'error'); return; }
   const channel = document.getElementById('response-channel').value;
-  showToast(`✅ Message sent via ${channel}`, 'success');
+  const result = await apiFetch('/interventions/trigger', {
+    method: 'POST',
+    body: JSON.stringify({
+      session_id: document.getElementById('session-id-input').value || 'demo_001',
+      intervention_type: 'assisted_response',
+      channel,
+      message: text,
+      approved_by: currentRole,
+    }),
+  });
+  if (!result) {
+    showToast('Response failed. Check the API connection and permissions, then retry.', 'error');
+    return;
+  }
+  showToast(`${result.message}. Trigger ID: ${result.trigger_id}`, 'info', 5000);
 }
 
 function copyResponse() {

@@ -92,7 +92,8 @@ class TestAPIEndpoints(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         data = res.json()
         self.assertIn("trigger_id", data)
-        self.assertEqual(data["status"], "sent")
+        self.assertEqual(data["status"], "simulated")
+        self.assertIn("no message was delivered", data["message"])
 
     def test_simulation(self):
         payload = {
