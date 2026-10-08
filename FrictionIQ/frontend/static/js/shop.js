@@ -1,5 +1,5 @@
 'use strict';
-let user = null, catalog = [], cart = {items: [], total: 0};
+let user = null, visitorSession = null, catalog = [], cart = {items: [], total: 0};
 const compared = new Set();
 const $ = id => document.getElementById(id);
 const money = value => new Intl.NumberFormat('en-IN', {style:'currency',currency:'INR',maximumFractionDigits:0}).format(value);
@@ -14,7 +14,7 @@ let noticeTimer;
 function notify(message) { $('notice').textContent=message; $('notice').hidden=false; clearTimeout(noticeTimer); noticeTimer=setTimeout(()=>$('notice').hidden=true,6000); }
 function reveal(id) { $(id).hidden=false; $(id).scrollIntoView({behavior:'smooth',block:'start'}); }
 function requireAccount() { if(user)return true; reveal('account'); notify('Sign in or create an account to shop.'); return false; }
-async function track(type, details={}) { if(user) await api('/events',{method:'POST',body:JSON.stringify({type,...details})}); }
+async function track(type, details={}) { if(user||visitorSession) await api('/events',{method:'POST',body:JSON.stringify({type,...details})}); }
 
 // Original SVG product illustrations, bundled with the application.
 function art(product) {
@@ -35,7 +35,7 @@ function renderCatalog() {
   $('products').innerHTML=items.map(p=>`<article class="product"><button class="product-art" data-view="${p.id}" style="background:${p.color}" aria-label="View ${esc(p.name)}">${art(p)}</button><h3>${esc(p.name)}</h3><p>${esc(p.category)} · Free delivery</p><p class="price">${money(p.price)}</p><div class="product-actions"><button class="primary" data-add="${p.id}">Add to bag</button><button data-compare="${p.id}">${compared.has(p.id)?'Remove comparison':'Compare'}</button></div></article>`).join('')||'<p>No products found. Try another search or category.</p>';
   return items.length;
 }
-async function loadCart() { if(!user)return; cart=await api('/cart'); renderCart(); }
+async function loadCart() { if(!user&&!visitorSession)return; cart=await api('/cart'); renderCart(); }
 function renderCart() {
   $('cart-count').textContent=cart.items.reduce((total,p)=>total+p.quantity,0);
   $('cart-items').innerHTML=cart.items.map(p=>`<div class="cart-row"><div><strong>${esc(p.name)}</strong><p>${money(p.price)} each</p></div><label>Quantity<input type="number" min="1" max="20" value="${p.quantity}" data-quantity="${p.id}" aria-label="${esc(p.name)} quantity"></label><button data-remove="${p.id}">Remove</button></div>`).join('')||'<p>Your bag is empty. Find something you love in the collection.</p>';
@@ -49,9 +49,10 @@ async function loadOrders() {
   $('orders').innerHTML=orders.map(o=>`<div class="cart-row"><div><strong>${esc(o.id)}</strong><p>${new Date(o.created).toLocaleString()} · ${esc(o.status)}</p><p>${o.items.map(p=>`${esc(p.name)} × ${p.quantity}`).join(', ')}</p></div><strong>${money(o.total)}</strong></div>`).join('')||'<p>No orders yet.</p>';
 }
 async function accountChanged() {
+  $('preferences').hidden=!user; $('email-consent').checked=!!user?.consent;
   $('account-button').textContent=user?user.name:'Sign in';$('auth-forms').hidden=!!user;$('logout-button').hidden=!user;
   $('session-label').textContent=user?`Tracking session: ${user.session_id}`:'Sign in to save your bag and start a tracked shopping session.';
-  if(user){await loadCart();await loadOrders();}else{cart={items:[],total:0};renderCart();$('orders-section').hidden=true;$('checkout').hidden=true;$('bag').hidden=true;}
+  if(user){await loadCart();await loadOrders();}else{if(!visitorSession)visitorSession=(await api('/anonymous',{method:'POST'})).session_id;await loadCart();$('orders-section').hidden=true;$('checkout').hidden=true;$('bag').hidden=true;}
 }
 function safe(handler) {return async event=>{try{await handler(event);}catch(error){notify(error.message);}};}
 ['login','signup'].forEach(kind=>$(kind+'-form').addEventListener('submit',safe(async event=>{
@@ -61,12 +62,13 @@ function safe(handler) {return async event=>{try{await handler(event);}catch(err
   }finally{button.disabled=false;}
 })));
 $('account-button').onclick=()=>reveal('account');
-$('logout-button').onclick=safe(async()=>{await api('/logout',{method:'POST'});user=null;await accountChanged();notify('Signed out.');});
-$('cart-button').onclick=safe(async()=>{if(requireAccount()){await loadCart();reveal('bag');}});
+$('preferences').addEventListener('submit',safe(async event=>{event.preventDefault();const result=await api('/preferences',{method:'PUT',body:JSON.stringify({consent:$('email-consent').checked})});user.consent=result.consent;notify('Email preference saved.');}));
+$('logout-button').onclick=safe(async()=>{await api('/logout',{method:'POST'});user=null;visitorSession=null;await accountChanged();notify('Signed out.');});
+$('cart-button').onclick=safe(async()=>{await loadCart();reveal('bag');});
 $('products').addEventListener('click',safe(async event=>{
   const button=event.target.closest('button');if(!button)return;
   if(button.dataset.view){const p=catalog.find(p=>p.id===button.dataset.view);await track('product_view',{product_id:p.id});$('product-detail').innerHTML=`${art(p)}<h2>${esc(p.name)}</h2><p>${esc(p.description)}</p><p>${money(p.price)} · Delivery in 3–5 business days</p>`;$('product-dialog').showModal();}
-  if(button.dataset.add&&requireAccount()){const id=button.dataset.add;await updateCart(id,(cart.items.find(p=>p.id===id)?.quantity||0)+1);notify('Added to your bag.');}
+  if(button.dataset.add){const id=button.dataset.add;await updateCart(id,(cart.items.find(p=>p.id===id)?.quantity||0)+1);notify('Added to your bag.');}
   if(button.dataset.compare){const id=button.dataset.compare;if(compared.has(id))compared.delete(id);else{if(compared.size===3)throw new Error('Compare up to three products.');compared.add(id);await track('product_compare',{product_id:id});}renderCatalog();$('comparison').hidden=!compared.size;$('comparison-items').innerHTML=catalog.filter(p=>compared.has(p.id)).map(p=>`<p><strong>${esc(p.name)} · ${money(p.price)}</strong><br>${esc(p.description)}</p>`).join('');}
 }));
 $('close-product').onclick=()=>$('product-dialog').close();
@@ -82,4 +84,4 @@ $('payment-form').addEventListener('submit',safe(async event=>{
     else notify(result.outcome==='failure'?'Simulated payment failed. Your bag is saved; try the demo wallet or retry.':'Payment cancelled. Your bag is saved.');
   }finally{button.disabled=false;}
 }));
-(async()=>{try{catalog=await api('/products');$('hero-art').innerHTML=art(catalog[1]);renderCatalog();try{user=await api('/me');}catch{user=null;}await accountChanged();}catch(error){notify(error.message);}})();
+(async()=>{try{catalog=await api('/products');$('hero-art').innerHTML=art(catalog[1]);try{user=await api('/me');}catch{user=null;}await accountChanged();await track(innerWidth<760?'device_mobile':'device_desktop');renderCatalog();}catch(error){notify(error.message);}})();

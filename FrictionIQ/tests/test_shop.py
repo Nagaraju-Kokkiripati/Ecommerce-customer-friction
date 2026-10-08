@@ -12,7 +12,8 @@ from api.main import create_app
 class TestShop(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.settings = patch("api.shop.get_settings", return_value=SimpleNamespace(DATA_DIR=Path(self.temp.name), ENV="development"))
+        from core.config import get_settings
+        self.settings = patch("api.shop.get_settings", return_value=get_settings().model_copy(update={"DATA_DIR": Path(self.temp.name)}))
         self.settings.start()
         self.client = TestClient(create_app())
         token = self.client.post("/api/auth/login", json={"username": "admin", "password": "admin123"}).json()["access_token"]
@@ -57,7 +58,7 @@ class TestShop(unittest.TestCase):
         # Recreating the application does not lose orders, events, or recovery.
         with TestClient(create_app()) as fresh:
             result = fresh.get(f"/api/journeys/{sid}", headers=self.admin).json()
-            self.assertEqual(result["recovery_outcome"], "purchase_after_simulated_action")
+            self.assertEqual(result["recovery_outcome"], "purchase_after_action")
             self.assertEqual(len(result["recoveries"]), 1)
 
     def test_access_validation_and_consent(self):
@@ -90,3 +91,54 @@ class TestShop(unittest.TestCase):
         for path in ("/shop", "/admin/journeys", "/static/js/shop.js", "/static/js/journeys.js", "/static/css/shop.css"):
             self.assertEqual(self.client.get(path).status_code, 200, path)
         self.assertEqual(len(self.client.get("/api/shop/products").json()), 6)
+
+    def test_anonymous_linking_and_abandonment(self):
+        sid = self.client.post("/api/shop/anonymous").json()["session_id"]
+        self.client.put("/api/shop/cart", json={"product_id": "p1", "quantity": 1})
+        self.client.post("/api/shop/events", json={"type": "product_view", "product_id": "p1"})
+        from api.shop import database
+        from datetime import datetime, timezone, timedelta
+        connection = database()
+        db = next(connection)
+        timestamp = (datetime.now(timezone.utc) - timedelta(minutes=31)).isoformat()
+        db.execute("UPDATE events SET timestamp=? WHERE session_id=?", (timestamp, sid))
+        try:
+            next(connection)
+        except StopIteration:
+            pass
+        detail = self.client.get(f"/api/journeys/{sid}", headers=self.admin).json()
+        self.assertEqual(detail["status"], "possibly_abandoned")
+        self.assertEqual(detail["name"], "Anonymous visitor")
+        self.assertEqual(self.signup(), sid)
+        self.assertEqual(self.client.get("/api/shop/cart").json()["total"], 2499)
+        self.assertEqual(self.client.get(f"/api/journeys/{sid}", headers=self.admin).json()["name"], "Customer")
+
+    def test_logout_revokes_token(self):
+        self.signup()
+        token = self.client.cookies.get("shop_token")
+        self.client.post("/api/shop/logout")
+        self.client.cookies.set("shop_token", token)
+        self.assertEqual(self.client.get("/api/shop/me").status_code, 401)
+
+    def test_model_predictions_are_labeled(self):
+        sid = self.signup()
+        detail = self.client.get(f"/api/journeys/{sid}", headers=self.admin).json()
+        self.assertEqual(detail["prediction"]["model"], "xgboost_v1")
+        self.assertEqual(detail["prediction"]["training_source"], "synthetic")
+        self.assertEqual(len(detail["prediction"]["drivers"]), 5)
+
+    def test_smtp_failure_and_acceptance_are_persistent(self):
+        sid = self.signup()
+        from core.config import get_settings
+        config = get_settings().model_copy(update={"DATA_DIR": Path(self.temp.name), "EMAIL_MODE": "smtp", "SMTP_HOST": "smtp.example.com", "SMTP_FROM": "shop@example.com"})
+        with patch("api.shop.get_settings", return_value=config), patch("smtplib.SMTP") as smtp:
+            smtp.return_value.__enter__.return_value.send_message.side_effect = OSError("Connection failed")
+            response = self.client.post(f"/api/journeys/{sid}/recovery", headers=self.admin, json={"message": "Please retry checkout"})
+            self.assertEqual(response.status_code, 502)
+            detail = self.client.get(f"/api/journeys/{sid}", headers=self.admin).json()
+            self.assertEqual(detail["recoveries"][0]["status"], "failed")
+            smtp.return_value.__enter__.return_value.send_message.side_effect = None
+            smtp.return_value.__enter__.return_value.send_message.return_value = {}
+            response = self.client.post(f"/api/journeys/{sid}/recovery", headers=self.admin, json={"message": "Please retry checkout"})
+            self.assertEqual(response.json()["status"], "accepted")
+            self.assertIn("not yet verified", response.json()["message"])

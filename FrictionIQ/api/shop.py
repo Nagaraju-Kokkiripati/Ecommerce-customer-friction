@@ -6,6 +6,8 @@ import re
 import secrets
 import sqlite3
 import uuid
+import time
+from collections import defaultdict
 from contextlib import closing
 from datetime import datetime, timezone
 
@@ -15,8 +17,19 @@ from typing import Literal
 
 from core.config import get_settings
 from core.security import create_access_token, decode_token, get_current_user
+from services.journey_intelligence import predict
 
 router = APIRouter()
+auth_attempts = defaultdict(list)
+
+
+def limit_auth(request):
+    key = (str(get_settings().DATA_DIR), request.client.host if request.client else "unknown", request.url.path)
+    recent = [value for value in auth_attempts[key] if time.monotonic() - value < 300]
+    auth_attempts[key] = recent
+    if len(recent) >= 20:
+        raise HTTPException(429, "Too many attempts; retry in five minutes")
+    recent.append(time.monotonic())
 
 PRODUCTS = [
     {"id": "p1", "name": "Everyday Headphones", "category": "Electronics", "price": 2499, "description": "Wireless over-ear headphones, 30-hour battery, USB-C charging. Includes a one-year warranty.", "art": "headphones", "color": "#e9ddff"},
@@ -45,6 +58,9 @@ def database():
             CREATE TABLE IF NOT EXISTS orders (id TEXT PRIMARY KEY, customer_id TEXT, session_id TEXT, total INTEGER, items TEXT, created TEXT);
             CREATE TABLE IF NOT EXISTS recoveries (id TEXT PRIMARY KEY, session_id TEXT, message TEXT, channel TEXT, created TEXT);
         ''')
+        for table, column, definition in [("journeys", "revoked", "INTEGER DEFAULT 0"), ("recoveries", "status", "TEXT DEFAULT 'simulated'"), ("recoveries", "error", "TEXT DEFAULT ''")]:
+            if column not in {r[1] for r in db.execute(f"PRAGMA table_info({table})")}:
+                db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
         yield db
 
 
@@ -62,10 +78,39 @@ def customer(request: Request, db=Depends(database)):
     if claims.get("role") != "customer":
         raise HTTPException(403, "Customer account required")
     row = db.execute("SELECT * FROM customers WHERE id=?", (claims.get("sub"),)).fetchone()
-    journey = db.execute("SELECT id FROM journeys WHERE id=? AND customer_id=?", (claims.get("session_id"), claims.get("sub"))).fetchone()
+    journey = db.execute("SELECT id FROM journeys WHERE id=? AND customer_id=? AND revoked=0", (claims.get("session_id"), claims.get("sub"))).fetchone()
     if not row or not journey:
         raise HTTPException(401, "Session unavailable; sign in again")
     return dict(row) | {"session_id": journey["id"]}
+
+
+def shopper(request: Request, db=Depends(database)):
+    token = request.cookies.get("shop_token")
+    if not token:
+        raise HTTPException(401, "Start a shopping session")
+    claims = decode_token(token)
+    if claims.get("role") == "customer":
+        return customer(request, db)
+    if claims.get("role") != "visitor":
+        raise HTTPException(403, "Shopping session required")
+    sid = claims.get("session_id")
+    if not db.execute("SELECT 1 FROM journeys WHERE id=? AND customer_id IS NULL AND revoked=0", (sid,)).fetchone():
+        raise HTTPException(401, "Session expired")
+    return {"id": sid, "session_id": sid, "name": "Anonymous visitor"}
+
+
+@router.post("/api/shop/anonymous")
+def anonymous(request: Request, response: Response, db=Depends(database)):
+    try:
+        existing = shopper(request, db)
+        return {"session_id": existing["session_id"]}
+    except HTTPException:
+        pass
+    sid = "shop_" + uuid.uuid4().hex
+    db.execute("INSERT INTO journeys(id,customer_id,created) VALUES(?,NULL,?)", (sid, now()))
+    event(db, sid, "session_start")
+    response.set_cookie("shop_token", create_access_token({"sub": sid, "role": "visitor", "session_id": sid}), httponly=True, samesite="strict", secure=get_settings().ENV != "development", max_age=3600)
+    return {"session_id": sid}
 
 
 def admin(request: Request, user=Depends(get_current_user)):
@@ -91,16 +136,32 @@ class Login(BaseModel):
     password: str = Field(max_length=128)
 
 
-def start_session(row, response, db):
+def start_session(row, response, db, request):
     sid = "shop_" + uuid.uuid4().hex
-    db.execute("INSERT INTO journeys VALUES(?,?,?)", (sid, row["id"], now()))
+    previous = None
+    try:
+        visitor = shopper(request, db)
+        if visitor["id"] == visitor["session_id"]:
+            previous = visitor["session_id"]
+    except HTTPException:
+        pass
+    if previous:
+        sid = previous
+        db.execute("UPDATE journeys SET customer_id=? WHERE id=?", (row["id"], sid))
+        for item in db.execute("SELECT * FROM carts WHERE customer_id=?", (sid,)).fetchall():
+            db.execute("INSERT INTO carts VALUES(?,?,?) ON CONFLICT(customer_id,product_id) DO UPDATE SET quantity=MIN(20,carts.quantity+excluded.quantity)", (row["id"], item["product_id"], item["quantity"]))
+        db.execute("DELETE FROM carts WHERE customer_id=?", (sid,))
+        event(db, sid, "account_linked")
+    else:
+        db.execute("INSERT INTO journeys(id,customer_id,created) VALUES(?,?,?)", (sid, row["id"], now()))
     event(db, sid, "session_start")
     response.set_cookie("shop_token", create_access_token({"sub": row["id"], "role": "customer", "session_id": sid}), httponly=True, samesite="strict", secure=get_settings().ENV != "development", max_age=3600)
     return {"name": row["name"], "session_id": sid, "consent": bool(row["consent"])}
 
 
 @router.post("/api/shop/signup")
-def signup(body: Signup, response: Response, db=Depends(database)):
+def signup(body: Signup, request: Request, response: Response, db=Depends(database)):
+    limit_auth(request)
     email = body.email.strip().lower()
     if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email) or not body.name.strip():
         raise HTTPException(422, "Enter a valid name and email")
@@ -109,21 +170,28 @@ def signup(body: Signup, response: Response, db=Depends(database)):
         db.execute("INSERT INTO customers VALUES(:id,:email,:name,:password,:consent)", row)
     except sqlite3.IntegrityError:
         raise HTTPException(409, "This email is already registered")
-    return start_session(row, response, db)
+    return start_session(row, response, db, request)
 
 
 @router.post("/api/shop/login")
-def login(body: Login, response: Response, db=Depends(database)):
+def login(body: Login, request: Request, response: Response, db=Depends(database)):
+    limit_auth(request)
     row = db.execute("SELECT * FROM customers WHERE email=?", (body.email.strip().lower(),)).fetchone()
     # Perform the same expensive hash on unknown accounts.
     stored = row["password"] if row else password_hash("dummy-password")
     if not hmac.compare_digest(password_hash(body.password, stored.split(":")[0]), stored) or not row:
         raise HTTPException(401, "Invalid email or password")
-    return start_session(row, response, db)
+    return start_session(row, response, db, request)
 
 
 @router.post("/api/shop/logout")
-def logout(response: Response):
+def logout(request: Request, response: Response, db=Depends(database)):
+    try:
+        user = shopper(request, db)
+        event(db, user["session_id"], "session_end")
+        db.execute("UPDATE journeys SET revoked=1 WHERE id=?", (user["session_id"],))
+    except HTTPException:
+        pass
     response.delete_cookie("shop_token")
     return {"status": "signed_out"}
 
@@ -133,19 +201,30 @@ def me(user=Depends(customer)):
     return {"name": user["name"], "session_id": user["session_id"], "consent": bool(user["consent"])}
 
 
+class Preference(BaseModel):
+    consent: bool
+
+
+@router.put("/api/shop/preferences")
+def preferences(body: Preference, user=Depends(customer), db=Depends(database)):
+    db.execute("UPDATE customers SET consent=? WHERE id=?", (int(body.consent), user["id"]))
+    event(db, user["session_id"], "email_preference_changed", {"consent": body.consent})
+    return {"consent": body.consent}
+
+
 @router.get("/api/shop/products")
 def products():
     return PRODUCTS
 
 
 class Event(BaseModel):
-    type: Literal["product_view", "search", "search_no_results", "checkout_start", "product_compare"]
+    type: Literal["product_view", "search", "search_no_results", "checkout_start", "product_compare", "device_mobile", "device_desktop"]
     product_id: str | None = None
     query: str = Field(default="", max_length=120)
 
 
 @router.post("/api/shop/events")
-def track(body: Event, user=Depends(customer), db=Depends(database)):
+def track(body: Event, user=Depends(shopper), db=Depends(database)):
     if body.product_id and body.product_id not in {p["id"] for p in PRODUCTS}:
         raise HTTPException(404, "Product not found")
     event(db, user["session_id"], body.type, body.model_dump(exclude_none=True))
@@ -160,7 +239,7 @@ def cart_data(db, uid):
 
 
 @router.get("/api/shop/cart")
-def cart(user=Depends(customer), db=Depends(database)):
+def cart(user=Depends(shopper), db=Depends(database)):
     return cart_data(db, user["id"])
 
 
@@ -170,7 +249,7 @@ class CartUpdate(BaseModel):
 
 
 @router.put("/api/shop/cart")
-def update_cart(body: CartUpdate, user=Depends(customer), db=Depends(database)):
+def update_cart(body: CartUpdate, user=Depends(shopper), db=Depends(database)):
     if body.product_id not in {p["id"] for p in PRODUCTS}:
         raise HTTPException(404, "Product not found")
     old = db.execute("SELECT quantity FROM carts WHERE customer_id=? AND product_id=?", (user["id"], body.product_id)).fetchone()
@@ -214,7 +293,7 @@ def orders(user=Depends(customer), db=Depends(database)):
 
 
 def journey_detail(db, sid):
-    row = db.execute("SELECT j.*,c.name,c.consent FROM journeys j JOIN customers c ON c.id=j.customer_id WHERE j.id=?", (sid,)).fetchone()
+    row = db.execute("SELECT j.*,COALESCE(c.name,'Anonymous visitor') AS name,COALESCE(c.consent,0) AS consent FROM journeys j LEFT JOIN customers c ON c.id=j.customer_id WHERE j.id=?", (sid,)).fetchone()
     if not row:
         raise HTTPException(404, "Captured session not found")
     events = [dict(e) | {"details": json.loads(e["details"])} for e in db.execute("SELECT * FROM events WHERE session_id=? ORDER BY id", (sid,))]
@@ -224,16 +303,30 @@ def journey_detail(db, sid):
     failures = counts.get("payment_failure", 0)
     completed = bool(counts.get("order_placed"))
     no_results = counts.get("search_no_results", 0)
+    inactive = (datetime.now(timezone.utc) - datetime.fromisoformat(events[-1]["timestamp"])).total_seconds() if events else 0
+    latest_quantities = {}
+    for e in events:
+        if e["type"] in ("add_to_cart", "remove_from_cart"):
+            latest_quantities[e["details"]["product_id"]] = e["details"]["quantity"]
+    abandoned = not completed and inactive >= get_settings().ABANDONMENT_MINUTES * 60 and any(latest_quantities.values())
     score = 0 if completed else min(95, failures * 35 + no_results * 15 + (15 if counts.get("checkout_start") else 0))
     facts = [f"{failures} simulated payment failures", f"{counts.get('product_view', 0)} product views", f"{no_results} searches with no results", "Order placed" if completed else "No order placed in this session"]
     inference = "Purchase completed; earlier friction was resolved." if completed else "Payment difficulties may prevent completion." if failures else "The customer may need help finding products." if no_results else "No strong friction signal yet; an unfinished session is not proof of abandonment."
     recommendation = "No intervention needed" if completed else "Offer an alternative demo payment method" if failures else "Help refine the search" if no_results else "Continue monitoring"
+    if abandoned:
+        score = max(score, 60)
+        facts.append(f"No recorded activity for at least {get_settings().ABANDONMENT_MINUTES} minutes after adding to cart")
+        if not failures and not no_results:
+            recommendation = "Offer cart assistance"
+            inference = "Cart inactivity suggests possible abandonment; it does not confirm the customer's intention."
     recovery = [dict(r) for r in db.execute("SELECT * FROM recoveries WHERE session_id=? ORDER BY created", (sid,))]
     recovered = False
     for action in recovery:
+        if action["status"] not in ("simulated", "accepted"):
+            continue
         if db.execute("SELECT 1 FROM orders WHERE customer_id=? AND created>? LIMIT 1", (row["customer_id"], action["created"])).fetchone():
             recovered = True
-    return {"session_id": sid, "name": row["name"], "created": row["created"], "consent": bool(row["consent"]), "events": events, "facts": facts, "inference": inference, "recommendation": recommendation, "risk_score": score, "model": "observed_event_rules", "completed": completed, "recoveries": recovery, "recovery_outcome": "purchase_after_simulated_action" if recovered else "awaiting_purchase" if recovery else "no_action"}
+    return {"session_id": sid, "name": row["name"], "created": row["created"], "consent": bool(row["consent"]), "events": events, "facts": facts, "inference": inference, "recommendation": recommendation, "risk_score": score, "model": "observed_event_rules", "prediction": predict(events, abandoned), "status": "converted" if completed else "possibly_abandoned" if abandoned else "active_or_unfinished", "completed": completed, "recoveries": recovery, "recovery_outcome": "purchase_after_action" if recovered else "awaiting_purchase" if recovery else "no_action"}
 
 
 @router.get("/api/journeys", dependencies=[Depends(admin)])
@@ -255,8 +348,36 @@ def recovery(sid: str, body: Recovery, db=Depends(database)):
     detail = journey_detail(db, sid)
     if not detail["consent"]:
         raise HTTPException(409, "Customer has not opted into recovery emails")
-    if detail["completed"]:
+    if detail["completed"] or detail["recovery_outcome"] == "purchase_after_action":
         raise HTTPException(409, "This session has already converted")
+    if not body.message.strip():
+        raise HTTPException(422, "Enter a recovery message")
+    config = get_settings()
     rid = "REC-" + uuid.uuid4().hex[:10]
-    db.execute("INSERT INTO recoveries VALUES(?,?,?,?,?)", (rid, sid, body.message, "email_simulation", now()))
-    return {"id": rid, "status": "simulated", "message": "Recovery recorded; no email was delivered"}
+    if config.EMAIL_MODE == "simulated":
+        db.execute("INSERT INTO recoveries(id,session_id,message,channel,created,status) VALUES(?,?,?,?,?,?)", (rid, sid, body.message, "email_simulation", now(), "simulated"))
+        return {"id": rid, "status": "simulated", "message": "Recovery recorded; no email was delivered"}
+    if not config.SMTP_HOST or not config.SMTP_FROM:
+        raise HTTPException(503, "Configure SMTP_HOST and SMTP_FROM before sending email")
+    row = db.execute("SELECT c.email FROM customers c JOIN journeys j ON j.customer_id=c.id WHERE j.id=?", (sid,)).fetchone()
+    db.execute("INSERT INTO recoveries(id,session_id,message,channel,created,status) VALUES(?,?,?,?,?,?)", (rid, sid, body.message, "email", now(), "sending"))
+    db.commit()
+    try:
+        import smtplib
+        from email.message import EmailMessage
+        mail = EmailMessage()
+        mail["From"], mail["To"], mail["Subject"] = config.SMTP_FROM, row["email"], "Help with your shopping journey"
+        mail.set_content(body.message)
+        with smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT, timeout=15) as smtp:
+            smtp.starttls()
+            if config.SMTP_USERNAME:
+                smtp.login(config.SMTP_USERNAME, config.SMTP_PASSWORD)
+            refused = smtp.send_message(mail)
+            if refused:
+                raise RuntimeError("Recipient refused")
+        db.execute("UPDATE recoveries SET status='accepted' WHERE id=?", (rid,))
+        return {"id": rid, "status": "accepted", "message": "Email accepted by SMTP server; delivery is not yet verified"}
+    except Exception:
+        db.execute("UPDATE recoveries SET status='failed',error='SMTP submission failed' WHERE id=?", (rid,))
+        db.commit()
+        raise HTTPException(502, "Email submission failed; inspect your SMTP configuration")

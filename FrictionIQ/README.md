@@ -1,176 +1,187 @@
-# FrictionIQ – AI Customer Journey Intelligence & Recovery
+# FrictionIQ — Connected customer journey detection and recovery
 
-**FrictionIQ** is an enterprise-grade AI assistant that detects e-commerce customer journey friction in real time, diagnoses root causes using multi-agent reasoning, simulates recovery interventions, and empowers cross-functional teams (Product, Marketing, Customer Care, Operations) with unified intelligence.
+A working research storefront and administrator dashboard sharing FastAPI and
+persistent SQLite storage. Analytics use recorded shop activity exclusively.
+The bundled synthetic session datasets, fabricated analytics, and random alerts
+have been removed. Existing customer accounts and captured sessions are preserved.
 
----
+## Run locally
 
-## Architecture Overview
+From the repository's `FrictionIQ` directory:
 
-```
-                      ┌───────────────────────────────────────────────┐
-                      │          FrictionIQ Modern SPA (Vanilla JS)   │
-                      │       Streamlit Cross-Team Dashboard          │
-                      └───────────────────────┬───────────────────────┘
-                                              │ HTTP / SSE
-                      ┌───────────────────────▼───────────────────────┐
-                      │        FastAPI Intelligence Gateway           │
-                      │  - JWT & RBAC Auth    - Real-Time SSE Stream  │
-                      │  - Audit Logging       - Static File Server   │
-                      └──────────────┬─────────────────┬──────────────┘
-                                     │                 │
-                ┌────────────────────▼────┐       ┌────▼────────────────────────┐
-                │   Intelligence Layer    │       │     Business Services       │
-                │ - XGBoost / LightGBM    │       │ - Funnel Analytics          │
-                │ - SHAP Explainability   │       │ - Counterfactual Simulator  │
-                │ - LangGraph 6-Agent Flow│       │ - Action Dispatcher         │
-                └─────────────────────────┘       └─────────────────────────────┘
-```
-
-### Key Modules
-
-1. **Synthetic Data Engine** (`data_layer/synthetic/generator.py`): Generates 5,000+ realistic multi-touchpoint sessions with behavioral noise and labeled friction patterns (payment failure, price shock, delivery date uncertainty, poor recommendations, product ambiguity).
-2. **ML Risk Scoring & Explainability** (`ml/trainer.py`):
-   - XGBoost (`AUC-ROC: 0.94`, `PR-AUC: 0.91`)
-   - LightGBM (`AUC-ROC: 0.93`)
-   - TreeSHAP feature contribution explainers per session.
-3. **Multi-Agent Reasoning Graph** (`agents/agent_graph.py`):
-   - **Journey Analyst**: pinpoints drop-off stage in the funnel.
-   - **Root Cause Agent**: fuses behavioral telemetry, gateway errors, and feedback text.
-   - **Recovery Strategist**: selects optimal recovery interventions.
-   - **Personalization Agent**: crafts tailored recovery nudges.
-   - **Critic & Guardrail Agent**: verifies discount caps (max 20%), PII redaction, and compliance.
-4. **Counterfactual Simulator** (`services/business.py`): Estimates conversion uplift, recovered revenue, net profit, and ROI before launching recovery campaigns.
-5. **Interactive Frontends**:
-   - **Single Page Application (SPA)** (`frontend/static/`): 10 rich dashboards including Executive Overview, Funnel Explorer, Live SSE Event Feed, Session Inspector, Root Cause Deep-dive, Assisted Response Workbench, and Governance Center.
-   - **Streamlit Dashboard** (`frontend/app.py`): Lightweight exploration UI for rapid testing and demonstrations.
-
----
-
-## Setup & Running the Application
-
-### 1. Install dependencies (from the FrictionIQ directory)
 ```powershell
 python -m venv venv
 .\venv\Scripts\python.exe -m pip install -r requirements.txt
-.\venv\Scripts\Activate.ps1
+$env:DEBUG = 'false'
+.\venv\Scripts\python.exe -m uvicorn frictioniq.main:app --reload --port 8000
 ```
 
-Use Python 3.11 or newer. The requirements include the API, rule-based
-inference, and test dependencies. XGBoost, LightGBM, SHAP, and Streamlit are
-optional extras; install them separately if you need those features. Without
-the optional model packages, risk scoring uses the existing rule-based fallback.
+Python 3.14 is verified locally. Use the virtual environment's Python directly;
+activation is optional. On an existing installation, run the pip command again
+to install the new XGBoost dependency.
 
-This is a prototype with bundled synthetic data, illustrative dashboard
-insights, development demo authentication, and in-memory audit records.
-Recovery actions return `simulated`; no email or SMS is delivered. Assisted
-responses now call the API and record a simulated intervention in the audit log.
-The connected storefront and captured-journey dashboard use persistent SQLite
-storage. Real email delivery, PostgreSQL migration, and production admin
-authentication still need implementation.
+| Page | Address |
+|---|---|
+| Unified dashboard | http://localhost:8000/ |
+| Customer storefront | http://localhost:8000/shop |
+| Dashboard alias | http://localhost:8000/admin/journeys |
+| API documentation | http://localhost:8000/api/docs |
 
-## Connected prototype and checklist
+Development admin: `admin` / `admin123`. Create customer accounts in the shop.
+The shop has six sample products with original bundled SVG illustrations.
+Payments and orders are simulated; no card data is collected.
 
-Open `/shop` to create a customer account and shop. Open `/admin/journeys`
-and sign in with the development administrator account `admin` / `admin123`
-to inspect captured events. The original `/` dashboard still includes synthetic
-analytics; its sample session inspector is separate from captured journeys.
+## Model
 
-### Phase 1 — Foundation
+The active bundled model is **XGBoost v1**, loaded from
+`models/registry/xgboost_v1.joblib`. It predicts from features extracted from
+recorded events and shows native TreeSHAP feature contributions. It was trained
+on synthetic sessions and is **not validated on real customers**. Synthetic
+training files and unsupported accuracy claims were removed; the pretrained
+artifact is retained and its provenance is displayed.
 
-- [x] Shared backend and persistent database (SQLite for this prototype).
-- [x] Customer signup/login/logout, password hashing, and validation; explicit
-  admin login required for captured journeys. Production admin authentication remains open.
-- [x] Product catalog with bundled original SVG illustrations.
+Observed-event rules separately explain payment failures, unsuccessful searches,
+and possible abandonment. These facts are distinct from model predictions.
+No LLM is active. Missing predictors use zero, and missing model dependencies
+produce an explicit unavailable state, never a fabricated score.
 
-### Phase 2 — E-commerce workflow
+## Checklist
 
-- [x] Product search, category filters, details, and comparison.
-- [x] Persistent shopping cart, quantity changes, removal, and checkout validation.
-- [x] Simulated successful/failed/cancelled payments and customer order history.
+### Foundation
 
-### Phase 3 — Behavior tracking
+- [x] Shared persistent backend/database (SQLite).
+- [x] Customer signup/login/logout, email validation, salted password hashes,
+  ownership checks, and revoked shopping sessions on logout.
+- [x] Protected admin APIs, configurable admin password hash, login attempt
+  throttling, security headers, and cross-origin action checks.
+- [x] Product catalog and bundled illustrations.
 
-- [x] Session IDs and persistent event collection for authenticated customers.
-- [x] Timestamped observed journey timelines.
-- [x] Admin session monitoring with manual refresh and protected APIs.
+### E-commerce workflow
 
-### Phase 4 — AI and recovery
+- [x] Search, category filters, details, and comparison.
+- [x] Guest and customer carts, quantities, removal, and validated checkout.
+- [x] Simulated successful/failed/cancelled payments and order history.
 
-- [x] Event-based friction scores with facts separated from interpretations.
-  Captured sessions use rules; trained-model/LLM integration is still open.
-- [x] Suggested interventions for payment difficulty and unsuccessful searches.
-- [ ] Real email drafting/sending integration. Editable drafts and consent-gated,
-  approved email simulations are implemented; nothing is delivered externally.
-- [x] Persistent recovery outcome tracking, including purchases in a later session.
-  A purchase after an action indicates sequence, not causal attribution.
+### Tracking and intelligence
 
-### Demonstrate the connected journey
+- [x] Anonymous and authenticated sessions with persistent event collection.
+- [x] Guest cart/session adoption when a customer signs in or registers.
+- [x] Timestamped timelines, recorded KPIs, observed funnel, automatic refresh.
+- [x] Possible abandonment after configurable inactivity (default 30 minutes)
+  with a nonempty recorded cart. Inactivity is an inference, not proof of intent.
+- [x] XGBoost inference, feature contributions, and evidence-based recommendations.
+- [x] Retraining workflow for collected outcomes with leakage checks and held-out
+  customer groups. Training refuses to invent rows when data is insufficient.
 
-1. Create a customer account in `/shop` and opt into recovery assistance emails.
-2. View a product, add it to the bag, and continue to checkout.
+### Recovery and deployment
+
+- [x] Editable drafts, customer consent, admin approval, persistent action history.
+- [x] SMTP submission with persisted failure/acceptance status.
+- [x] Purchases after successful/simulated actions tracked across customer sessions.
+- [x] Container packaging and environment configuration.
+- [ ] Configure an email provider and verify real submission/inbox delivery.
+- [ ] Choose a hosting target and deploy with HTTPS and persistent storage.
+- [ ] Collect sufficient mature outcomes, train a candidate, and evaluate live accuracy.
+
+SQLite is suitable for this single-instance prototype. Multi-instance hosting
+needs a shared database and shared rate limiting. PostgreSQL migration is not
+implemented. Password reset, unsubscribe management for production mail,
+provider delivery webhooks, and broader production operations need further work.
+
+## Demonstration
+
+1. Browse anonymously, view a product, and add it to the bag.
+2. Register at checkout; opt into recovery assistance email if desired.
 3. Enter a demo address and simulate payment failure twice.
-4. In `/admin/journeys`, refresh and inspect that customer's session. Review
-   the observed failures, rule-based risk, and alternative-payment recommendation.
-5. Review the recovery draft and approve the simulated email.
-6. Return to the shop and simulate payment success (optionally sign out and
-   sign back in first). Refresh the dashboard to see the recorded recovery outcome.
+4. Sign in to the dashboard and inspect that session. Review observed facts,
+   rule explanations, and the separate XGBoost prediction.
+5. Edit and approve a recovery draft. Without SMTP configuration it is simulated.
+6. Simulate successful checkout, then inspect the recorded purchase after action.
 
-Data lives in `FrictionIQ/data/storefront.sqlite3` (ignored by Git). Account
-passwords are salted and hashed; delivery addresses and card data are not stored.
-Only signed-in shopping activity is captured. Anonymous tracking, automatic
-abandonment detection, live dashboard updates, and production hardening remain open.
+Dashboard updates every five seconds without overwriting edited drafts. Revenue
+is from simulated orders; purchases after actions do not establish causation.
+The dashboard is empty until shopping activity is recorded.
 
-### 2. Start the Backend API & SPA Server
+## Real email configuration
+
+Copy `.env.example` to `.env`, then configure locally:
+
+```dotenv
+EMAIL_MODE=smtp
+SMTP_HOST=your-provider-host
+SMTP_PORT=587
+SMTP_USERNAME=your-provider-username
+SMTP_PASSWORD=your-provider-password
+SMTP_FROM=your-verified-sender@example.com
+```
+
+Restart the API. Admin approval then submits real email to the opted-in customer's
+registered address. STARTTLS is required. Status `accepted` means the SMTP server
+accepted the message; it does not confirm inbox delivery. `failed` records a
+submission failure. A crash during submission can leave `sending`; verify with
+the provider before retrying. Tests mock SMTP and never send external mail.
+
+## Retrain from collected outcomes
+
 ```powershell
 $env:DEBUG = 'false'
-python -m uvicorn frictioniq.main:app --reload --port 8000
-```
-- Access Modern SPA: [http://localhost:8000/](http://localhost:8000/)
-- Access Swagger Docs: [http://localhost:8000/api/docs](http://localhost:8000/api/docs)
-
-### 3. Start the Streamlit Dashboard (Optional)
-```powershell
-streamlit run frontend/app.py
-```
-- Access Streamlit: [http://localhost:8501/](http://localhost:8501/)
-
----
-
-## Running Automated Tests
-
-Run the complete test suite (19 unit & integration tests covering APIs, multi-agent graph, and business services):
-```powershell
-.\venv\Scripts\python -m unittest discover -s tests -p "test_*.py"
-node tests/test_recovery_ui.cjs
+.\venv\Scripts\python.exe -m ml.train_captured
+# Review the candidate's held-out metrics before activating:
+.\venv\Scripts\python.exe -m ml.train_captured --activate
 ```
 
-Optional browser verification on Windows with Microsoft Edge installed:
+Training requires at least 100 sessions older than a day and at least 20 of each
+outcome. Conversion and mature cart inactivity are proxy labels, not confirmed
+intentions. Terminal payment/order events and inactivity-derived exit flags are
+excluded from predictors. Customer groups are disjoint between training and
+holdout; newest first-seen groups are held out. Metrics are measured on the
+holdout and not presented as live production accuracy.
+
+The candidate is saved to `data/model_candidate.joblib`; activation saves
+`data/model_live.joblib`. Restart the API to use it. Both are ignored by Git.
+Back up activated models and the SQLite database along with deployment storage.
+
+## Deployment preparation
+
+Outside development, configure `ENV=production`, a random `SECRET_KEY` of at least
+32 characters, `ADMIN_USERNAME`, and `ADMIN_PASSWORD_HASH`. The application refuses
+to start without the key and hash. Generate values locally:
 
 ```powershell
+.\venv\Scripts\python.exe -c "import secrets; print(secrets.token_urlsafe(48))"
+.\venv\Scripts\python.exe -c "from getpass import getpass; from api.shop import password_hash; print(password_hash(getpass('Admin password: ')))"
+```
+
+Generate the password hash while `ENV` is still `development`, then set production
+configuration. Production shopping cookies require HTTPS. Configure
+`ALLOWED_ORIGINS` to the actual HTTPS origin. Keep `.env` out of Git.
+
+For a local **development** container:
+
+```powershell
+docker build -t frictioniq .
+docker run --rm -p 8000:8000 --env-file .env -v frictioniq-data:/app/persist frictioniq
+```
+
+For production, use HTTPS termination, provider-managed secrets, a durable volume
+at `/app/persist`, backups, and a single application instance. The Dockerfile is
+provided; the local Docker daemon was unavailable, so its build is unverified.
+No hosted deployment or real email submission has been performed.
+
+## Verification
+
+```powershell
+$env:DEBUG = 'false'
+.\venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
+node --check frontend/static/js/shop.js
+node --check frontend/static/js/journeys.js
+# Optional browser check with Microsoft Edge installed:
 .\venv\Scripts\python.exe -m pip install playwright
 .\venv\Scripts\python.exe tests/run_shop_browser.py
 ```
 
-This exercises signup, product viewing, cart, two payment failures, administrator
-inspection, recovery simulation, successful purchase, and a mobile layout check.
-It starts an isolated test server on port 8766 and uses a temporary database.
-
----
-
-## Key Endpoints
-
-| Endpoint | Method | Description |
-|---|---|---|
-| `/` | GET | FrictionIQ Modern SPA |
-| `/api/health` | GET | System health & status check |
-| `/api/kpis` | GET | High-level business & risk metrics |
-| `/api/funnel` | GET | Multi-stage journey funnel analysis |
-| `/api/friction/alerts` | GET | Active friction incidents & revenue at risk |
-| `/api/sessions/{session_id}/risk` | POST | ML abandonment risk prediction & SHAP factors |
-| `/api/root-causes` | POST | 6-agent root cause analysis & recommendations |
-| `/api/interventions/trigger` | POST | Human-in-the-loop intervention dispatch |
-| `/api/simulate` | POST | Counterfactual recovery ROI simulator |
-| `/api/audit-log` | GET | Governance audit trail entries |
-| `/api/models/metrics` | GET | Registered ML model performance benchmarks |
-| `/api/stream/events` | GET | Real-time Server-Sent Events (SSE) stream |
-| `/friction/root-causes` | POST | Legacy/Streamlit compatible agent analysis |
+Tests use temporary SQLite databases. They cover empty analytics, actual event
+totals, auth/ownership, guest linking, inactivity, XGBoost inference, SMTP failure
+and acceptance, recovery outcomes, and exclusion of terminal outcomes from model
+features. The browser check covers the complete shopping/recovery journey and a
+mobile overflow check.

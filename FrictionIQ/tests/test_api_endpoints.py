@@ -1,133 +1,66 @@
-"""
-Tests for FrictionIQ FastAPI REST endpoints and SPA static serving.
-"""
+"""Live analytics must be empty without captured data and require authentication."""
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 from fastapi.testclient import TestClient
-from api.main import app
+from api.main import create_app
+from core.config import get_settings
+
 
 class TestAPIEndpoints(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.client = TestClient(app)
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        config = get_settings().model_copy(update={"DATA_DIR": Path(self.temp.name)})
+        self.patch = patch("api.shop.get_settings", return_value=config)
+        self.patch.start()
+        self.client = TestClient(create_app())
+        token = self.client.post("/api/auth/login", json={"username": "admin", "password": "admin123"}).json()["access_token"]
+        self.headers = {"Authorization": "Bearer " + token}
 
-    def test_health_check(self):
-        res = self.client.get("/api/health")
-        self.assertEqual(res.status_code, 200)
-        data = res.json()
-        self.assertEqual(data["status"], "healthy")
-        self.assertIn("version", data)
+    def tearDown(self):
+        self.client.close()
+        self.patch.stop()
+        self.temp.cleanup()
 
-    def test_legacy_health(self):
-        res = self.client.get("/health")
-        self.assertEqual(res.status_code, 200)
-        self.assertEqual(res.json()["status"], "healthy")
+    def test_empty_analytics_are_not_fabricated(self):
+        kpis = self.client.get("/api/kpis", headers=self.headers).json()
+        self.assertEqual(kpis["total_sessions"], 0)
+        self.assertEqual(kpis["order_revenue"], 0)
+        self.assertEqual(kpis["source"], "captured_events")
+        self.assertEqual(self.client.get("/api/friction/alerts", headers=self.headers).json()["alerts"], [])
+        self.assertEqual(self.client.get("/api/feedback/themes", headers=self.headers).json()["themes"], [])
+        self.assertEqual(sum(s["sessions"] for s in self.client.get("/api/funnel", headers=self.headers).json()["stages"]), 0)
 
-    def test_kpis(self):
-        res = self.client.get("/api/kpis")
-        self.assertEqual(res.status_code, 200)
-        data = res.json()
-        self.assertIn("total_sessions", data)
-        self.assertIn("conversion_rate", data)
-        self.assertIn("revenue_at_risk", data)
-        self.assertGreater(data["total_sessions"], 0)
+    def test_analytics_follow_checkout(self):
+        self.client.post("/api/shop/signup", json={"name": "Test", "email": "test@example.com", "password": "password123"})
+        self.client.post("/api/shop/events", json={"type": "product_view", "product_id": "p1"})
+        self.client.put("/api/shop/cart", json={"product_id": "p1", "quantity": 1})
+        self.client.post("/api/shop/events", json={"type": "checkout_start"})
+        self.client.post("/api/shop/payment", json={"outcome": "failure", "delivery_address": "123 Demo Street"})
+        kpis = self.client.get("/api/kpis", headers=self.headers).json()
+        self.assertEqual(kpis["payment_failures"], 1)
+        self.assertEqual(kpis["revenue_at_risk"], 2499)
+        self.client.post("/api/shop/payment", json={"outcome": "success", "delivery_address": "123 Demo Street"})
+        kpis = self.client.get("/api/kpis", headers=self.headers).json()
+        self.assertEqual(kpis["conversion_rate"], 100)
+        self.assertEqual(kpis["order_revenue"], 2499)
+        self.assertEqual(kpis["revenue_at_risk"], 0)
 
-    def test_funnel(self):
-        res = self.client.get("/api/funnel")
-        self.assertEqual(res.status_code, 200)
-        data = res.json()
-        self.assertIn("stages", data)
-        self.assertIsInstance(data["stages"], list)
-        self.assertGreater(len(data["stages"]), 0)
+    def test_admin_authentication_required(self):
+        for path in ("/api/kpis", "/api/funnel", "/api/models/metrics", "/api/audit-log", "/api/journeys"):
+            self.assertEqual(self.client.get(path).status_code, 403)
+        self.assertEqual(self.client.post("/api/auth/login", json={"username": "admin", "password": "wrong"}).status_code, 401)
 
-    def test_friction_alerts(self):
-        res = self.client.get("/api/friction/alerts")
-        self.assertEqual(res.status_code, 200)
-        data = res.json()
-        self.assertIn("alerts", data)
-        self.assertIsInstance(data["alerts"], list)
+    def test_model_provenance_without_fake_accuracy(self):
+        model = self.client.get("/api/models/metrics", headers=self.headers).json()
+        self.assertEqual(model["model"], "xgboost_v1")
+        self.assertIsNone(model["live_validation_metrics"])
+        self.assertEqual(model["llm"], "none")
 
-    def test_session_risk_prediction(self):
-        payload = {
-            "num_events": 15,
-            "duration_sec": 340,
-            "num_payment_fails": 2,
-            "num_compares": 3,
-            "reached_checkout": 1,
-            "placed_order": 0,
-        }
-        res = self.client.post("/api/sessions/test_session_99/risk", json=payload)
-        self.assertEqual(res.status_code, 200)
-        data = res.json()
-        self.assertIn("risk_score", data)
-        self.assertIn("risk_label", data)
-        self.assertIn("session_id", data)
-
-    def test_root_cause_analysis(self):
-        payload = {
-            "session_id": "test_session_101",
-            "risk_score": 85.0,
-            "features": {
-                "num_payment_fails": 2,
-                "reached_checkout": 1,
-            },
-            "payment_context": {"gateway": "Stripe", "failure_code": "insufficient_funds"},
-            "feedback_text": "Card failed twice at final step",
-        }
-        res = self.client.post("/api/root-causes", json=payload)
-        self.assertEqual(res.status_code, 200)
-        data = res.json()
-        self.assertIn("root_causes", data)
-        self.assertIn("recommended_interventions", data)
-        self.assertIn("compliance_approved", data)
-
-    def test_intervention_trigger(self):
-        payload = {
-            "session_id": "sess_recovery_1",
-            "intervention_type": "alternate_payment_method",
-            "channel": "in_app_modal",
-            "message": "We noticed your card had an issue. Would you like to use UPI or NetBanking?",
-            "approved_by": "admin",
-        }
-        res = self.client.post("/api/interventions/trigger", json=payload)
-        self.assertEqual(res.status_code, 200)
-        data = res.json()
-        self.assertIn("trigger_id", data)
-        self.assertEqual(data["status"], "simulated")
-        self.assertIn("no message was delivered", data["message"])
-
-    def test_simulation(self):
-        payload = {
-            "intervention_type": "targeted_incentive_10pct",
-            "audience_size": 2000,
-            "baseline_conversion": 2.5,
-            "incentive_pct": 10.0,
-            "avg_order_value": 75.0,
-        }
-        res = self.client.post("/api/simulate", json=payload)
-        self.assertEqual(res.status_code, 200)
-        data = res.json()
-        self.assertIn("revenue_recovered", data)
-        self.assertIn("net_revenue", data)
-        self.assertIn("roi", data)
-
-    def test_model_metrics(self):
-        res = self.client.get("/api/models/metrics")
-        self.assertEqual(res.status_code, 200)
-        data = res.json()
-        self.assertIn("xgboost", data)
-
-    def test_feedback_themes(self):
-        res = self.client.get("/api/feedback/themes")
-        self.assertEqual(res.status_code, 200)
-        data = res.json()
-        self.assertIn("themes", data)
-
-    def test_frontend_home(self):
-        res = self.client.get("/")
-        self.assertEqual(res.status_code, 200)
-        self.assertIn("text/html", res.headers.get("content-type", ""))
-        self.assertIn("FrictionIQ", res.text)
-        self.assertIn("app-shell", res.text)
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_pages_and_unknown_sessions(self):
+        self.assertEqual(self.client.get("/api/health").json()["status"], "healthy")
+        for path in ("/", "/admin", "/admin/journeys", "/shop"):
+            self.assertEqual(self.client.get(path).status_code, 200)
+        self.assertEqual(self.client.post("/api/sessions/missing/risk", headers=self.headers).status_code, 404)
+        self.assertEqual(self.client.get("/api/stream/events").status_code, 404)

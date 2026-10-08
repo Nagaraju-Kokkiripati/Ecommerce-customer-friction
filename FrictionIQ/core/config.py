@@ -26,6 +26,15 @@ class Settings(BaseSettings):
     APP_VERSION: str = "2.0.0"
     ENV: Literal["development", "staging", "production"] = "development"
     DEBUG: bool = True
+    ADMIN_USERNAME: str = "admin"
+    ADMIN_PASSWORD_HASH: str = ""
+    ABANDONMENT_MINUTES: int = Field(default=30, ge=1)
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = 587
+    SMTP_USERNAME: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_FROM: str = ""
+    EMAIL_MODE: Literal["simulated", "smtp"] = "simulated"
     LOG_LEVEL: str = "INFO"
 
     # ── Paths ─────────────────────────────────────────────────────────────────
@@ -77,5 +86,10 @@ class Settings(BaseSettings):
 @lru_cache()
 def get_settings() -> Settings:
     s = Settings()
+    if s.ENV != "development":
+        if s.SECRET_KEY == "CHANGE_ME_IN_PRODUCTION_USE_256BIT_KEY" or len(s.SECRET_KEY) < 32:
+            raise ValueError("Configure a random SECRET_KEY of at least 32 characters")
+        if not s.ADMIN_PASSWORD_HASH:
+            raise ValueError("Configure ADMIN_PASSWORD_HASH outside development")
     s.ensure_dirs()
     return s
