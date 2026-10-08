@@ -1,0 +1,26 @@
+{
+  "logistic_regression": {
+    "auc_roc": 1.0,
+    "pr_auc": 1.0,
+    "f1": 1.0,
+    "brier_score": 4.2055176794607513e-07,
+    "support_positive": 1405,
+    "support_total": 2000
+  },
+  "lightgbm": {
+    "auc_roc": 1.0,
+    "pr_auc": 1.0,
+    "f1": 1.0,
+    "brier_score": 2.8216090098951723e-13,
+    "support_positive": 1405,
+    "support_total": 2000
+  },
+  "xgboost": {
+    "auc_roc": 1.0,
+    "pr_auc": 1.0,
+    "f1": 1.0,
+    "brier_score": 9.165540291178331e-07,
+    "support_positive": 1405,
+    "support_total": 2000
+  }
+}
