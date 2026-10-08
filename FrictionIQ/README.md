@@ -64,8 +64,61 @@ This is a prototype with bundled synthetic data, illustrative dashboard
 insights, development demo authentication, and in-memory audit records.
 Recovery actions return `simulated`; no email or SMS is delivered. Assisted
 responses now call the API and record a simulated intervention in the audit log.
-The customer storefront, durable session ingestion, real email delivery, and
-production authentication still need implementation.
+The connected storefront and captured-journey dashboard use persistent SQLite
+storage. Real email delivery, PostgreSQL migration, and production admin
+authentication still need implementation.
+
+## Connected prototype and checklist
+
+Open `/shop` to create a customer account and shop. Open `/admin/journeys`
+and sign in with the development administrator account `admin` / `admin123`
+to inspect captured events. The original `/` dashboard still includes synthetic
+analytics; its sample session inspector is separate from captured journeys.
+
+### Phase 1 — Foundation
+
+- [x] Shared backend and persistent database (SQLite for this prototype).
+- [x] Customer signup/login/logout, password hashing, and validation; explicit
+  admin login required for captured journeys. Production admin authentication remains open.
+- [x] Product catalog with bundled original SVG illustrations.
+
+### Phase 2 — E-commerce workflow
+
+- [x] Product search, category filters, details, and comparison.
+- [x] Persistent shopping cart, quantity changes, removal, and checkout validation.
+- [x] Simulated successful/failed/cancelled payments and customer order history.
+
+### Phase 3 — Behavior tracking
+
+- [x] Session IDs and persistent event collection for authenticated customers.
+- [x] Timestamped observed journey timelines.
+- [x] Admin session monitoring with manual refresh and protected APIs.
+
+### Phase 4 — AI and recovery
+
+- [x] Event-based friction scores with facts separated from interpretations.
+  Captured sessions use rules; trained-model/LLM integration is still open.
+- [x] Suggested interventions for payment difficulty and unsuccessful searches.
+- [ ] Real email drafting/sending integration. Editable drafts and consent-gated,
+  approved email simulations are implemented; nothing is delivered externally.
+- [x] Persistent recovery outcome tracking, including purchases in a later session.
+  A purchase after an action indicates sequence, not causal attribution.
+
+### Demonstrate the connected journey
+
+1. Create a customer account in `/shop` and opt into recovery assistance emails.
+2. View a product, add it to the bag, and continue to checkout.
+3. Enter a demo address and simulate payment failure twice.
+4. In `/admin/journeys`, refresh and inspect that customer's session. Review
+   the observed failures, rule-based risk, and alternative-payment recommendation.
+5. Review the recovery draft and approve the simulated email.
+6. Return to the shop and simulate payment success (optionally sign out and
+   sign back in first). Refresh the dashboard to see the recorded recovery outcome.
+
+Data lives in `FrictionIQ/data/storefront.sqlite3` (ignored by Git). Account
+passwords are salted and hashed; delivery addresses and card data are not stored.
+Only signed-in shopping activity is captured. Anonymous tracking, automatic
+abandonment detection, live dashboard updates, and production hardening remain open.
 
 ### 2. Start the Backend API & SPA Server
 ```powershell
@@ -90,6 +143,17 @@ Run the complete test suite (19 unit & integration tests covering APIs, multi-ag
 .\venv\Scripts\python -m unittest discover -s tests -p "test_*.py"
 node tests/test_recovery_ui.cjs
 ```
+
+Optional browser verification on Windows with Microsoft Edge installed:
+
+```powershell
+.\venv\Scripts\python.exe -m pip install playwright
+.\venv\Scripts\python.exe tests/run_shop_browser.py
+```
+
+This exercises signup, product viewing, cart, two payment failures, administrator
+inspection, recovery simulation, successful purchase, and a mobile layout check.
+It starts an isolated test server on port 8766 and uses a temporary database.
 
 ---
 

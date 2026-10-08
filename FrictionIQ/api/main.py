@@ -54,6 +54,9 @@ def create_app() -> FastAPI:
         redoc_url="/api/redoc",
     )
 
+    from api.shop import router as shop_router
+    app.include_router(shop_router)
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.ALLOWED_ORIGINS,
@@ -319,6 +322,14 @@ def create_app() -> FastAPI:
         if index_path.exists():
             return HTMLResponse(index_path.read_text(encoding="utf-8"))
         return HTMLResponse("<h1>FrictionIQ – API running. Frontend not built yet.</h1><p><a href='/api/docs'>API Docs</a></p>")
+
+    @app.get("/shop", response_class=HTMLResponse)
+    async def serve_shop():
+        return HTMLResponse((frontend_dir / "shop.html").read_text(encoding="utf-8"))
+
+    @app.get("/admin/journeys", response_class=HTMLResponse)
+    async def serve_journeys():
+        return HTMLResponse((frontend_dir / "journeys.html").read_text(encoding="utf-8"))
 
     @app.get("/{path:path}", response_class=HTMLResponse)
     async def spa_fallback(path: str):
