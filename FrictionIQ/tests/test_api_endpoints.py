@@ -1,6 +1,7 @@
 """Live analytics must be empty without captured data and require authentication."""
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 from fastapi.testclient import TestClient
@@ -31,6 +32,25 @@ class TestAPIEndpoints(unittest.TestCase):
         self.assertEqual(self.client.get("/api/friction/alerts", headers=self.headers).json()["alerts"], [])
         self.assertEqual(self.client.get("/api/feedback/themes", headers=self.headers).json()["themes"], [])
         self.assertEqual(sum(s["sessions"] for s in self.client.get("/api/funnel", headers=self.headers).json()["stages"]), 0)
+
+    def test_request_connection_can_move_between_workers(self):
+        from api.shop import database
+        dependency = database()
+        with ThreadPoolExecutor(max_workers=1) as creator, ThreadPoolExecutor(max_workers=1) as endpoint:
+            db = creator.submit(next, dependency).result()
+            try:
+                count = endpoint.submit(lambda: db.execute("SELECT COUNT(*) FROM journeys").fetchone()[0]).result()
+                self.assertEqual(count, 0)
+            finally:
+                endpoint.submit(dependency.close).result()
+
+    def test_parallel_dashboard_refresh(self):
+        # Initialize schema, then reproduce the dashboard's simultaneous reads.
+        self.client.get("/api/kpis", headers=self.headers)
+        paths = ["/api/kpis", "/api/journeys", "/api/funnel"] * 8
+        with ThreadPoolExecutor(max_workers=6) as workers:
+            responses = list(workers.map(lambda path: self.client.get(path, headers=self.headers), paths))
+        self.assertTrue(all(response.status_code == 200 for response in responses))
 
     def test_analytics_follow_checkout(self):
         self.client.post("/api/shop/signup", json={"name": "Test", "email": "test@example.com", "password": "password123"})

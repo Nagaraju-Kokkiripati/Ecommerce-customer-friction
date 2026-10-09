@@ -47,7 +47,9 @@ def now():
 
 def database():
     path = get_settings().DATA_DIR / "storefront.sqlite3"
-    with closing(sqlite3.connect(path, timeout=15)) as db, db:
+    # FastAPI may resume one request's dependencies/endpoint on different workers.
+    # Each request owns its connection; it is never shared between requests.
+    with closing(sqlite3.connect(path, timeout=15, check_same_thread=False)) as db, db:
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys=ON")
         db.executescript('''
